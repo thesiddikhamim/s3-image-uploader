@@ -65,6 +65,18 @@ interface S3UploaderSettings {
 	ignorePattern: string;
 	disableAutoUploadOnCreate: boolean;
 	askRename: boolean;
+	// Public Bucket settings
+	publicAccessKey: string;
+	publicSecretKey: string;
+	publicRegion: string;
+	publicBucket: string;
+	publicFolder: string;
+	publicImageUrlPath: string;
+	publicUseCustomEndpoint: boolean;
+	publicCustomEndpoint: string;
+	publicForcePathStyle: boolean;
+	publicUseCustomImageUrl: boolean;
+	publicCustomImageUrl: string;
 }
 
 const DEFAULT_SETTINGS: S3UploaderSettings = {
@@ -93,6 +105,18 @@ const DEFAULT_SETTINGS: S3UploaderSettings = {
 	ignorePattern: "",
 	disableAutoUploadOnCreate: false,
 	askRename: true,
+	// Public Bucket default settings
+	publicAccessKey: "",
+	publicSecretKey: "",
+	publicRegion: "",
+	publicBucket: "",
+	publicFolder: "",
+	publicImageUrlPath: "",
+	publicUseCustomEndpoint: false,
+	publicCustomEndpoint: "",
+	publicForcePathStyle: false,
+	publicUseCustomImageUrl: false,
+	publicCustomImageUrl: "",
 };
 
 function sanitizeFilename(name: string): string {
@@ -107,9 +131,10 @@ function sanitizeFilename(name: string): string {
 }
 
 export default class S3UploaderPlugin extends Plugin {
-	settings: S3UploaderSettings;
-	s3: S3Client;
-	pasteFunction: pasteFunction;
+	settings!: S3UploaderSettings;
+	s3!: S3Client;
+	publicS3!: S3Client;
+	pasteFunction!: pasteFunction;
 
 	private async replaceText(
 		editor: Editor,
@@ -213,25 +238,28 @@ export default class S3UploaderPlugin extends Plugin {
 		return matchesGlobPattern(pathToCheck, this.settings.ignorePattern);
 	}
 
-	async uploadFile(file: File, key: string): Promise<string> {
-		// Check if S3 client is initialized
-		if (!this.s3) {
+	async uploadFile(file: File, key: string, isPublic: boolean = false): Promise<string> {
+		const client = isPublic ? this.publicS3 : this.s3;
+		if (!client) {
 			throw new Error(
-				"S3 client not configured. Please configure the plugin settings first.",
+				isPublic
+					? "Public S3 client not configured. Please configure the public bucket settings first."
+					: "S3 client not configured. Please configure the plugin settings first.",
 			);
 		}
 
 		const buf = await file.arrayBuffer();
-		await this.s3.send(
+		await client.send(
 			new PutObjectCommand({
-				Bucket: this.settings.bucket,
+				Bucket: isPublic ? this.settings.publicBucket : this.settings.bucket,
 				Key: key,
 				Body: new Uint8Array(buf),
 				ContentType: file.type,
 			}),
 		);
-		let urlString = this.settings.imageUrlPath + key;
-		if (this.settings.queryStringKey && this.settings.queryStringValue) {
+		let urlString = (isPublic ? this.settings.publicImageUrlPath : this.settings.imageUrlPath) + key;
+		
+		if (!isPublic && this.settings.queryStringKey && this.settings.queryStringValue) {
 			try {
 				const urlObject = new URL(urlString);
 				urlObject.searchParams.append(
@@ -253,20 +281,21 @@ export default class S3UploaderPlugin extends Plugin {
 		return urlString;
 	}
 
-	async checkFileExists(key: string, localUpload: boolean): Promise<boolean> {
+	async checkFileExists(key: string, localUpload: boolean, isPublic: boolean = false): Promise<boolean> {
 		if (localUpload) {
 			return await this.app.vault.adapter.exists(key);
 		} else {
-			if (!this.s3) return false;
+			const client = isPublic ? this.publicS3 : this.s3;
+			if (!client) return false;
 			try {
-				await this.s3.send(
+				await client.send(
 					new HeadObjectCommand({
-						Bucket: this.settings.bucket,
+						Bucket: isPublic ? this.settings.publicBucket : this.settings.bucket,
 						Key: key,
 					}),
 				);
 				return true;
-			} catch (error) {
+			} catch (error: any) {
 				if (
 					error.name === "NotFound" ||
 					error.$metadata?.httpStatusCode === 404
@@ -312,6 +341,7 @@ export default class S3UploaderPlugin extends Plugin {
 		const fm = this.app.metadataCache.getFileCache(noteFile)?.frontmatter;
 		// localUpload is only controlled via per-note frontmatter (localUpload: true)
 		const localUpload = fm?.localUpload === true;
+		const isPublic = fm?.uploadPublic === true;
 		const uploadVideo = fm?.uploadVideo ?? this.settings.uploadVideo;
 		const uploadAudio = fm?.uploadAudio ?? this.settings.uploadAudio;
 		const uploadPdf = fm?.uploadPdf ?? this.settings.uploadPdf;
@@ -514,7 +544,7 @@ export default class S3UploaderPlugin extends Plugin {
 						const justFilename =
 							attachPath.split("/").pop() ?? newFileName;
 						validResults.push(`![[${justFilename}]]`);
-					} catch (error) {
+					} catch (error: any) {
 						console.error(error);
 						validResults.push(
 							`Error saving file locally: ${error.message}`,
@@ -522,7 +552,7 @@ export default class S3UploaderPlugin extends Plugin {
 					}
 				} else {
 					// ── S3 / R2 upload path ──────────────────────────────────
-					let folder = fm?.uploadFolder ?? this.settings.folder;
+					let folder = fm?.uploadFolder ?? (isPublic ? this.settings.publicFolder : this.settings.folder);
 
 					const currentDate = new Date();
 					folder = folder
@@ -543,7 +573,7 @@ export default class S3UploaderPlugin extends Plugin {
 					let key = folder ? `${folder}/${newFileName}` : newFileName;
 
 					// Check for existence on S3
-					const exists = await this.checkFileExists(key, false);
+					const exists = await this.checkFileExists(key, false, isPublic);
 					if (exists) {
 						const choice = await new Promise<
 							"rename" | "overwrite" | "cancel"
@@ -575,12 +605,12 @@ export default class S3UploaderPlugin extends Plugin {
 					}
 
 					try {
-						const url = await this.uploadFile(uploadFile, key);
+						const url = await this.uploadFile(uploadFile, key, isPublic);
 						const markdown = wrapFileDependingOnType(url, thisType, "");
 						if (markdown) {
 							validResults.push(markdown);
 						}
-					} catch (error) {
+					} catch (error: any) {
 						console.error(error);
 						validResults.push(
 							`Error uploading file: ${error.message}`,
@@ -611,7 +641,7 @@ export default class S3UploaderPlugin extends Plugin {
 							: "All files uploaded successfully",
 					);
 				}
-			} catch (error) {
+			} catch (error: any) {
 				console.error("Error during upload or insertion:", error);
 				new Notice(`Error: ${error.message}`);
 			}
@@ -619,31 +649,51 @@ export default class S3UploaderPlugin extends Plugin {
 	}
 
 	createS3Client(): void {
-		// Don't create S3 client if region is not configured
-		if (!this.settings.region) {
-			return;
+		// Private bucket
+		if (this.settings.region) {
+			const apiEndpoint = this.settings.useCustomEndpoint
+				? this.settings.customEndpoint
+				: `https://s3.${this.settings.region}.amazonaws.com/`;
+			this.settings.imageUrlPath = this.settings.useCustomImageUrl
+				? this.settings.customImageUrl
+				: this.settings.forcePathStyle
+					? apiEndpoint + this.settings.bucket + "/"
+					: apiEndpoint.replace("://", `://${this.settings.bucket}.`);
+
+			this.s3 = new S3Client({
+				region: this.settings.region,
+				credentials: {
+					accessKeyId: this.settings.accessKey,
+					secretAccessKey: this.settings.secretKey,
+				},
+				endpoint: apiEndpoint,
+				forcePathStyle: this.settings.forcePathStyle,
+				requestHandler: new ObsHttpHandler(),
+			});
 		}
 
-		const apiEndpoint = this.settings.useCustomEndpoint
-			? this.settings.customEndpoint
-			: `https://s3.${this.settings.region}.amazonaws.com/`;
-		this.settings.imageUrlPath = this.settings.useCustomImageUrl
-			? this.settings.customImageUrl
-			: this.settings.forcePathStyle
-				? apiEndpoint + this.settings.bucket + "/"
-				: apiEndpoint.replace("://", `://${this.settings.bucket}.`);
+		// Public bucket
+		if (this.settings.publicRegion) {
+			const publicApiEndpoint = this.settings.publicUseCustomEndpoint
+				? this.settings.publicCustomEndpoint
+				: `https://s3.${this.settings.publicRegion}.amazonaws.com/`;
+			this.settings.publicImageUrlPath = this.settings.publicUseCustomImageUrl
+				? this.settings.publicCustomImageUrl
+				: this.settings.publicForcePathStyle
+					? publicApiEndpoint + this.settings.publicBucket + "/"
+					: publicApiEndpoint.replace("://", `://${this.settings.publicBucket}.`);
 
-		this.s3 = new S3Client({
-			region: this.settings.region,
-			credentials: {
-				accessKeyId: this.settings.accessKey,
-				secretAccessKey: this.settings.secretKey,
-			},
-			endpoint: apiEndpoint,
-			forcePathStyle: this.settings.forcePathStyle,
-			// Use Obsidian's requestUrl-backed handler to avoid browser fetch/CORS failures in desktop/mobile.
-			requestHandler: new ObsHttpHandler(),
-		});
+			this.publicS3 = new S3Client({
+				region: this.settings.publicRegion,
+				credentials: {
+					accessKeyId: this.settings.publicAccessKey,
+					secretAccessKey: this.settings.publicSecretKey,
+				},
+				endpoint: publicApiEndpoint,
+				forcePathStyle: this.settings.publicForcePathStyle,
+				requestHandler: new ObsHttpHandler(),
+			});
+		}
 	}
 
 	async onload() {
@@ -742,7 +792,7 @@ export default class S3UploaderPlugin extends Plugin {
 					}
 
 					await this.app.vault.delete(file);
-				} catch (error) {
+				} catch (error: any) {
 					new Notice(`Error processing file: ${error.message}`);
 				}
 			}),
@@ -767,9 +817,9 @@ export default class S3UploaderPlugin extends Plugin {
 class S3UploaderSettingTab extends PluginSettingTab {
 	plugin: S3UploaderPlugin;
 	// Add properties to store compression setting elements
-	private compressionSizeSettings: Setting;
-	private compressionQualitySettings: Setting;
-	private compressionDimensionSettings: Setting;
+	private compressionSizeSettings!: Setting;
+	private compressionQualitySettings!: Setting;
+	private compressionDimensionSettings!: Setting;
 
 	constructor(app: App, plugin: S3UploaderPlugin) {
 		super(app, plugin);
@@ -815,6 +865,12 @@ class S3UploaderSettingTab extends PluginSettingTab {
 		});
 		coffeeImg.height = 45;
 		containerEl.createEl("br");
+
+		containerEl.createEl("h3", { text: "Private Bucket Settings (Default)" });
+		containerEl.createEl("p", {
+			text: "Used by default if `uploadPublic: true` is not in the frontmatter.",
+			cls: "setting-item-description",
+		});
 
 		new Setting(containerEl)
 			.setName("AWS Access Key ID")
@@ -1076,6 +1132,157 @@ class S3UploaderSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					}),
 			);
+
+		containerEl.createEl("br");
+		containerEl.createEl("h3", { text: "Public Bucket Settings" });
+		containerEl.createEl("p", {
+			text: "Used if `uploadPublic: true` is present in the note's frontmatter. Query strings are not supported here.",
+			cls: "setting-item-description",
+		});
+
+		new Setting(containerEl)
+			.setName("Public AWS Access Key ID")
+			.setDesc("AWS access key ID for a user with S3 access.")
+			.addText((text) => {
+				wrapTextWithPasswordHide(text);
+				text.setPlaceholder("access key")
+					.setValue(this.plugin.settings.publicAccessKey)
+					.onChange(async (value) => {
+						this.plugin.settings.publicAccessKey = value.trim();
+						this.plugin.createS3Client();
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Public AWS Secret Key")
+			.setDesc("AWS secret key for that user.")
+			.addText((text) => {
+				wrapTextWithPasswordHide(text);
+				text.setPlaceholder("secret key")
+					.setValue(this.plugin.settings.publicSecretKey)
+					.onChange(async (value) => {
+						this.plugin.settings.publicSecretKey = value.trim();
+						this.plugin.createS3Client();
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Public Region")
+			.setDesc("AWS region of the public S3 bucket.")
+			.addText((text) =>
+				text
+					.setPlaceholder("aws region")
+					.setValue(this.plugin.settings.publicRegion)
+					.onChange(async (value) => {
+						this.plugin.settings.publicRegion = value.trim();
+						this.plugin.createS3Client();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Public S3 Bucket")
+			.setDesc("Public S3 bucket name.")
+			.addText((text) =>
+				text
+					.setPlaceholder("bucket name")
+					.setValue(this.plugin.settings.publicBucket)
+					.onChange(async (value) => {
+						this.plugin.settings.publicBucket = value.trim();
+						this.plugin.createS3Client();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Public Bucket folder")
+			.setDesc(
+				"Optional folder in public s3 bucket. Support the use of ${year}, ${month}, ${day} and ${basename} variables.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("folder")
+					.setValue(this.plugin.settings.publicFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.publicFolder = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Use custom endpoint (Public)")
+			.setDesc("Use the custom api endpoint below for the public bucket.")
+			.addToggle((toggle) => {
+				toggle
+					.setValue(this.plugin.settings.publicUseCustomEndpoint)
+					.onChange(async (value) => {
+						this.plugin.settings.publicUseCustomEndpoint = value;
+						this.plugin.createS3Client();
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Custom S3 Endpoint (Public)")
+			.setDesc("Optionally set a custom endpoint for any S3 compatible storage provider.")
+			.addText((text) =>
+				text
+					.setPlaceholder("https://s3.myhost.com/")
+					.setValue(this.plugin.settings.publicCustomEndpoint)
+					.onChange(async (value) => {
+						value = value.match(/^https?:\/\//) ? value : "https://" + value;
+						value = value.replace(/([^/])$/, "$1/");
+						this.plugin.settings.publicCustomEndpoint = value.trim();
+						this.plugin.createS3Client();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("S3 Path Style URLs (Public)")
+			.setDesc("Advanced option to force using (legacy) path-style s3 URLs.")
+			.addToggle((toggle) => {
+				toggle
+					.setValue(this.plugin.settings.publicForcePathStyle)
+					.onChange(async (value) => {
+						this.plugin.settings.publicForcePathStyle = value;
+						this.plugin.createS3Client();
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Use custom image URL (Public)")
+			.setDesc("Use the custom image URL below for the public bucket.")
+			.addToggle((toggle) => {
+				toggle
+					.setValue(this.plugin.settings.publicUseCustomImageUrl)
+					.onChange(async (value) => {
+						this.plugin.settings.publicUseCustomImageUrl = value;
+						this.plugin.createS3Client();
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Custom Image URL (Public)")
+			.setDesc("Advanced option to force inserting custom image URLs for the public bucket.")
+			.addText((text) =>
+				text
+					.setValue(this.plugin.settings.publicCustomImageUrl)
+					.onChange(async (value) => {
+						value = value.match(/^https?:\/\//) ? value : "https://" + value;
+						value = value.replace(/([^/])$/, "$1/");
+						this.plugin.settings.publicCustomImageUrl = value.trim();
+						this.plugin.createS3Client();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		containerEl.createEl("br");
+		containerEl.createEl("h3", { text: "General Settings" });
 
 		new Setting(containerEl)
 			.setName("Enable Image Compression")

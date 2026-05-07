@@ -23,6 +23,7 @@ When a note has `localUpload: true` in its YAML frontmatter the file is saved lo
 
 ## Features
 
+- **Dual Storage Buckets** — configure both a default (private) bucket and a secondary public bucket simultaneously. Use frontmatter to route files properly.
 - **Paste & drag-drop** — intercepts clipboard paste and drag-and-drop events and uploads automatically.
 - **S3-compatible** — works with AWS S3, Cloudflare R2, MinIO, Backblaze B2, and any provider with an S3-compatible API.
 - **Per-note overrides** — every setting can be overridden on a note-by-note basis via YAML frontmatter.
@@ -114,7 +115,11 @@ Then reload the plugin in Obsidian (**Settings → Community Plugins → disable
 
 Open **Settings → S3 Image Uploader** to configure the plugin.
 
-### S3 / Storage Credentials
+### S3 / Storage Credentials (Private default & Public)
+
+The settings page features two distinct sections to define credentials:
+1. **Private Bucket Settings (Default)** — Used standardly.
+2. **Public Bucket Settings** — Used when `uploadPublic: true` is included in the note's frontmatter. Query strings are not supported for public buckets.
 
 | Setting | Description |
 |---|---|
@@ -189,11 +194,12 @@ Any note can override global settings by adding keys to its YAML frontmatter (be
 ```yaml
 ---
 localUpload: true          # Save locally instead of uploading to S3
+uploadPublic: true         # Upload to the public bucket instead of the default private bucket
 uploadOnDrag: true         # Override the global drag-and-drop setting
 uploadVideo: true          # Allow video uploads for this note
 uploadAudio: true          # Allow audio uploads for this note
 uploadPdf: true            # Allow PDF uploads for this note
-uploadFolder: "my-folder"  # Use a different S3 folder for this note
+uploadFolder: "my-folder"  # Use a different S3 folder for this note (applies to both public and private)
 ---
 ```
 
@@ -201,15 +207,15 @@ Frontmatter values always take priority over the plugin settings panel.
 
 ---
 
-## Local Upload Mode
+## Upload Routing Precedence & Local Mode
 
-When `localUpload: true` is present in a note's frontmatter, **no data is sent to S3**. Instead:
+When pasting or dropping files, the plugin decides where to send the file based on the following precedence:
 
-1. The rename dialog still appears (if **Ask to rename** is enabled).
-2. The file is saved via Obsidian's native attachment API — it goes to **whatever folder you have configured in Obsidian's own Settings → Files & Links → Default location for new attachments**.
-3. An Obsidian wikilink (`![[filename.png]]`) is inserted at the cursor rather than a remote URL.
+1. **`localUpload: true`**: No data is sent to S3. The file is saved via Obsidian's native attachment API. It is routed to whatever folder you have configured in **Obsidian's own Settings → Files & Links → Default location for new attachments**.
+2. **`uploadPublic: true`**: If `localUpload` is false or missing, the file is uploaded to your **Public Bucket**, using the credentials and endpoints configured under the Public Bucket settings section.
+3. **Default**: If neither of the above are set, the file uploads to your **Private Bucket (Default)**.
 
-This is a per-note setting only — there is no global toggle. Add or remove `localUpload: true` from the note's frontmatter as needed.
+All modes still respect features like the rename dialog (if enabled) and conflict checks.
 
 ---
 
@@ -220,7 +226,7 @@ This is a per-note setting only — there is no global toggle. Add or remove `lo
 3. **Rename** — if **Ask to rename** is on, a modal appears with an auto-sanitized suggested name. Press **Enter**, click **Upload**, or click **Keep** to accept.
 4. **Conflict check** — the plugin checks whether a file with the same key already exists. If it does, you can **Rename**, **Overwrite**, or **Cancel**.
 5. **Compression** — if enabled and the file is an image, it is compressed before upload.
-6. **Upload / save** — the file is either uploaded to S3 or saved locally depending on `localUpload`.
+6. **Upload / save** — the file is processed through the hierarchy of `localUpload` -> `uploadPublic` -> `Default (Private) S3 upload`.
 7. **Link insertion** — the appropriate markdown is inserted at the cursor:
    - S3 image → `![image](https://…)`
    - S3 video → `<video src="…" controls />`
